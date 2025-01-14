@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-co-op/gocron"
@@ -175,53 +176,103 @@ func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionRe
 }
 
 // queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
+// func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) []backup {
+// 	var backups []backup
+
+// 	log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
+
+// 	// get actionsets
+// 	actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
+// 	if err != nil {
+// 		log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
+// 		os.Exit(1)
+// 	}
+
+// 	log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
+
+// 	// loop through actionsets
+// 	for _, actionset := range actionsets.Items {
+// 		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+// 		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
+
+// 		// skip ahead if the ActionSet is not a backup
+// 		if actionSpec["name"] != "backup" {
+// 			continue
+// 		}
+
+// 		// check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
+// 		if _, ok := actionSpec["options"]; !ok {
+// 			continue
+// 		}
+// 		if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
+// 			continue
+// 		}
+// 		if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; !ok {
+// 			continue
+// 		}
+
+// 		thisBackup := backup{
+// 			name:           fmt.Sprintf("%v", actionMetadata["name"]),
+// 			status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+// 			schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
+// 			backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]),
+// 		}
+// 		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+// 		if thisBackup.schedule == backupConfig.Name {
+// 			backups = append(backups, thisBackup)
+// 		}
+// 	}
+// 	return backups
+// }
+
+// queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
 func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) []backup {
-	var backups []backup
+    var backups []backup
 
-	log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
+    log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
 
-	// get actionsets
-	actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
-	if err != nil {
-		log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
-		os.Exit(1)
-	}
+    // get actionsets
+    actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
+    if err != nil {
+        log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
+        os.Exit(1)
+    }
 
-	log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
+    log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
 
-	// loop through actionsets
-	for _, actionset := range actionsets.Items {
-		actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
-		actionMetadata := actionset.Object["metadata"].(map[string]interface{})
+    // loop through actionsets
+    for _, actionset := range actionsets.Items {
+        actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+        actionMetadata := actionset.Object["metadata"].(map[string]interface{})
 
-		// skip ahead if the ActionSet is not a backup
-		if actionSpec["name"] != "backup" {
-			continue
-		}
+        // skip ahead if the ActionSet does not start with "backup"
+        if !strings.HasPrefix(actionSpec["name"].(string), "backup") {
+            continue
+        }
 
-		// check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
-		if _, ok := actionSpec["options"]; !ok {
-			continue
-		}
-		if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
-			continue
-		}
-		if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]; !ok {
-			continue
-		}
+        // check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
+        if _, ok := actionSpec["options"]; !ok {
+            continue
+        }
+        if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
+            continue
+        }
+        if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["backupLocation"]; !ok {
+            continue
+        }
 
-		thisBackup := backup{
-			name:           fmt.Sprintf("%v", actionMetadata["name"]),
-			status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-			schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
-			backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["keyValue"].(map[string]interface{})["backupLocation"]),
-		}
-		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-		if thisBackup.schedule == backupConfig.Name {
-			backups = append(backups, thisBackup)
-		}
-	}
-	return backups
+        thisBackup := backup{
+            name:           fmt.Sprintf("%v", actionMetadata["name"]),
+            status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+            schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
+            backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["backupLocation"]),
+        }
+        thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+        if thisBackup.schedule == backupConfig.Name {
+            backups = append(backups, thisBackup)
+        }
+    }
+    return backups
 }
 
 // determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
