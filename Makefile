@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-# GO := GO15VENDOREXPERIMENT=1 go
+GO := GO15VENDOREXPERIMENT=1 go
 NAME := taweret
 OS := $(shell uname)
 MAIN_GO := main.go
