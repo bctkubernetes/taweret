@@ -10,12 +10,11 @@ spec:
       resources: {}
       taskSpec:
         metadata: {}
+        spec: null
         stepTemplate:
           image: uses:jenkins-x/jx3-pipeline-catalog/tasks/go/release.yaml@versionStream
           name: ""
-          resources:
-            # override limits for all containers here
-            limits: {}
+          resources: {}
           workingDir: /workspace/source
         steps:
         - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone.yaml@versionStream
@@ -25,12 +24,16 @@ spec:
           resources: {}
         - name: jx-variables
           resources:
-            # override requests for the pod here
             requests:
               cpu: 400m
               memory: 600Mi
-        - name: build-make-build
+        - image: golang:1.23
+          name: build-make-build
           resources: {}
+          script: |
+            #!/bin/bash
+            source .jx/variables.sh
+            make build
         - name: check-registry
           resources: {}
         - name: build-container-build
