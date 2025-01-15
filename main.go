@@ -242,8 +242,14 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
 
     // loop through actionsets
     for _, actionset := range actionsets.Items {
-        actionSpec := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
-        actionMetadata := actionset.Object["metadata"].(map[string]interface{})
+        actionSpec, ok := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+        if !ok {
+            continue
+        }
+        actionMetadata, ok := actionset.Object["metadata"].(map[string]interface{})
+        if !ok {
+            continue
+        }
 
         // skip ahead if the ActionSet does not start with "backup"
         if !strings.HasPrefix(actionSpec["name"].(string), "backup") {
@@ -251,21 +257,32 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
         }
 
         // check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
-        if _, ok := actionSpec["options"]; !ok {
+        options, ok := actionSpec["options"].(map[string]interface{})
+        if !ok {
             continue
         }
-        if _, ok := actionSpec["options"].(map[string]interface{})["backup-schedule"]; !ok {
+        backupSchedule, ok := options["backup-schedule"].(string)
+        if !ok {
             continue
         }
-        if _, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["backupLocation"]; !ok {
+        artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})
+        if !ok {
+            continue
+        }
+        cloudObject, ok := artifacts["cloudObject"].(map[string]interface{})
+        if !ok {
+            continue
+        }
+        backupLocation, ok := cloudObject["backupLocation"].(string)
+        if !ok {
             continue
         }
 
         thisBackup := backup{
             name:           fmt.Sprintf("%v", actionMetadata["name"]),
             status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-            schedule:       fmt.Sprintf("%v", actionSpec["options"].(map[string]interface{})["backup-schedule"]),
-            backupLocation: fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})["cloudObject"].(map[string]interface{})["backupLocation"]),
+            schedule:       backupSchedule,
+            backupLocation: backupLocation,
         }
         thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
         if thisBackup.schedule == backupConfig.Name {
