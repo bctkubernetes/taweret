@@ -314,7 +314,7 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 	maxBackupDateTime = maxBackupDateTime.AddDate(int(backupConfig.Retention.Years)*-1, int(backupConfig.Retention.Months)*-1, int(backupConfig.Retention.Days)*-1)
 
 	for _, aBackup := range uncategorisedBackups {
-		if aBackup.time.After(maxBackupDateTime) && aBackup.status == "complete" {
+		if aBackup.time.After(maxBackupDateTime) && (aBackup.status == "complete" || aBackup.status == "failed") {
 			aBackup.inUse = true
 			categorisedBackups = append(categorisedBackups, aBackup)
 		} else if aBackup.status == "pending" {
@@ -331,7 +331,7 @@ func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig)
 	}
 
 	categorisedAndSortedBackups := sortBackups(categorisedBackups, backupConfig)
-
+	log.Printf("%v: categorised backups: %v\n", backupConfig.Name, len(categorisedAndSortedBackups))
 	return categorisedAndSortedBackups, backupCounts
 }
 
