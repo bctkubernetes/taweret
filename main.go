@@ -100,7 +100,7 @@ func main() {
 
 func scheduleEvaluations(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, clientSet *kubernetes.Clientset, taweretMetrics taweretmetrics) {
 	// set evaluation schedule
-	const evalSchedule string = "1/1 * * * *"
+	const evalSchedule string = "*/10 * * * *"
 
 	// schedule backup evaluations
 	s := gocron.NewScheduler(time.UTC)
@@ -266,38 +266,33 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
             continue
         }
 
-        // Commenting out artifacts, cloudObject, and backupLocation
-        /*
-        artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{})
-        if (!ok) {
-            continue
+        var backupLocation string
+        if artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{}); ok {
+            if cloudObject, ok := artifacts["cloudObject"].(map[string]interface{}); ok {
+                backupLocation, _ = cloudObject["backupLocation"].(string)
+				if !ok {
+                    backupLocation = ""
+                }
+			}
         }
-        cloudObject, ok := artifacts["cloudObject"].(map[string]interface{})
-        if (!ok) {
-            continue
-        }
-        backupLocation, ok := cloudObject["backupLocation"].(string)
-        if (!ok) {
-            continue
-        }
-        */
 
         thisBackup := backup{
             name:           fmt.Sprintf("%v", actionMetadata["name"]),
             status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
             schedule:       backupSchedule,
-            // Commenting out backupLocation
             // backupLocation: backupLocation,
         }
-        thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
+        if backupLocation != "" {
+            thisBackup.backupLocation = backupLocation
+        }
+		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
         if thisBackup.schedule == backupConfig.Name {
-			log.Printf("Selected actionset: %v", thisBackup.name)
+            log.Printf("Selected actionset: %v", thisBackup.name)
             backups = append(backups, thisBackup)
         }
     }
     return backups
 }
-
 
 // determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
 func categoriseBackups(uncategorisedBackups []backup, backupConfig backupconfig) ([]backup, backupcounts) {
@@ -364,6 +359,12 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 // 	// set name of deletion actionset
 // 	deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
 
+// 	// check if the deletion actionset already exists
+//     _, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+//     if err == nil {
+//         log.Printf("Deletion actionset %v already exists, skipping creation", deletionActionsetName)
+//         return
+//     }
 // 	// construct actionset crd manifest to delete backup
 // 	deletionActionSet := v1alpha1.ActionSet{
 // 		Spec: &v1alpha1.ActionSetSpec{
@@ -453,9 +454,15 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 
 // deletes a specified backup by creating an actionset with the action 'delete'
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
-
     // set name of deletion actionset
     deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
+
+    // check if the deletion actionset already exists
+    _, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+    if err == nil {
+        log.Printf("Deletion actionset %v already exists, skipping creation", deletionActionsetName)
+        return
+    }
 
     // construct actionset crd manifest to delete backup
     deletionActionSet := v1alpha1.ActionSet{
@@ -464,23 +471,9 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
                 {
                     Name:      "delete",
                     Blueprint: backupConfig.BlueprintName,
-                    // Commenting out Artifacts
-                    /*
-                    Artifacts: map[string]v1alpha1.Artifact{
-                        "cloudObject": {
-                            KeyValue: map[string]string{
-                                "backupLocation": unusedBackup.backupLocation,
-                            },
-                        },
-                    },
-                    */
                     Object: v1alpha1.ObjectReference{
                         Kind:      "namespace",
                         Name:      backupConfig.KanisterNamespace,
-                        Namespace: backupConfig.KanisterNamespace,
-                    },
-                    Profile: &v1alpha1.ObjectReference{
-                        Name:      backupConfig.ProfileName,
                         Namespace: backupConfig.KanisterNamespace,
                     },
                 },
@@ -494,6 +487,25 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
             Name:      deletionActionsetName,
             Namespace: backupConfig.KanisterNamespace,
         },
+    }
+
+    // Add Artifacts if backupLocation exists
+    if unusedBackup.backupLocation != "" {
+        deletionActionSet.Spec.Actions[0].Artifacts = map[string]v1alpha1.Artifact{
+            "cloudObject": {
+                KeyValue: map[string]string{
+                    "backupLocation": unusedBackup.backupLocation,
+                },
+            },
+        }
+    }
+
+    // Add Profile if provided
+    if backupConfig.ProfileName != "" {
+        deletionActionSet.Spec.Actions[0].Profile = &v1alpha1.ObjectReference{
+            Name:      backupConfig.ProfileName,
+            Namespace: backupConfig.KanisterNamespace,
+        }
     }
 
     // convert to unstructured to apply with dynamicClient
@@ -544,7 +556,6 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
         log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
         os.Exit(1)
     }
-
 }
 // UnmarshalYAML is a custom YAML unmarshaller to allow string to stringint type conversion
 func (st *StringInt) UnmarshalYAML(b []byte) error {
