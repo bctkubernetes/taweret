@@ -227,71 +227,71 @@ func getBackupConfigs(clientset *kubernetes.Clientset, gvr schema.GroupVersionRe
 
 // queries Kubernetes for Actionsets, adds the actionsets with action name 'backup' to a slice of backup objects and returns the slice
 func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) []backup {
-    var backups []backup
+	var backups []backup
 
-    log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
+	log.Printf("%v: retrieving actionsets from Kubernetes", backupConfig.Name)
 
-    // get actionsets
-    actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
-    if err != nil {
-        log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
-        os.Exit(1)
-    }
+	// get actionsets
+	actionsets, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).List(context.Background(), v1.ListOptions{})
+	if err != nil {
+		log.Printf("%v: error getting actionsets: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
 
-    log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
+	log.Printf("%v: filtering backup actionsets from Kubernetes", backupConfig.Name)
 
-    // loop through actionsets
-    for _, actionset := range actionsets.Items {
-        actionSpec, ok := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
-        if !ok {
-            continue
-        }
-        actionMetadata, ok := actionset.Object["metadata"].(map[string]interface{})
-        if !ok {
-            continue
-        }
+	// loop through actionsets
+	for _, actionset := range actionsets.Items {
+		actionSpec, ok := actionset.Object["spec"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		actionMetadata, ok := actionset.Object["metadata"].(map[string]interface{})
+		if !ok {
+			continue
+		}
 
-        // skip ahead if the ActionSet does not start with "backup"
-        if !strings.HasPrefix(actionSpec["name"].(string), "backup") {
-            continue
-        }
+		// skip ahead if the ActionSet does not start with "backup"
+		if !strings.HasPrefix(actionSpec["name"].(string), "backup") {
+			continue
+		}
 
-        // check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
-        options, ok := actionSpec["options"].(map[string]interface{})
-        if !ok {
-            continue
-        }
-        backupSchedule, ok := options["backup-schedule"].(string)
-        if !ok {
-            continue
-        }
+		// check for the existence of the keys, if they do not exist, return early. The if statements are split up to avoid runtime errors.
+		options, ok := actionSpec["options"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		backupSchedule, ok := options["backup-schedule"].(string)
+		if !ok {
+			continue
+		}
 
-        var backupLocation string
-        if artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{}); ok {
-            if cloudObject, ok := artifacts["cloudObject"].(map[string]interface{}); ok {
-                backupLocation, _ = cloudObject["backupLocation"].(string)
+		var backupLocation string
+		if artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{}); ok {
+			if cloudObject, ok := artifacts["cloudObject"].(map[string]interface{}); ok {
+				backupLocation, _ = cloudObject["backupLocation"].(string)
 				if !ok {
-                    backupLocation = ""
-                }
+					backupLocation = ""
+				}
 			}
-        }
+		}
 
-        thisBackup := backup{
-            name:           fmt.Sprintf("%v", actionMetadata["name"]),
-            status:         fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-            schedule:       backupSchedule,
-            // backupLocation: backupLocation,
-        }
-        if backupLocation != "" {
-            thisBackup.backupLocation = backupLocation
-        }
+		thisBackup := backup{
+			name:     fmt.Sprintf("%v", actionMetadata["name"]),
+			status:   fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+			schedule: backupSchedule,
+			// backupLocation: backupLocation,
+		}
+		if backupLocation != "" {
+			thisBackup.backupLocation = backupLocation
+		}
 		thisBackup.time, _ = time.Parse(time.RFC3339, fmt.Sprintf("%v", actionMetadata["creationTimestamp"]))
-        if thisBackup.schedule == backupConfig.Name {
-            log.Printf("Selected actionset: %v", thisBackup.name)
-            backups = append(backups, thisBackup)
-        }
-    }
-    return backups
+		if thisBackup.schedule == backupConfig.Name {
+			log.Printf("Selected actionset: %v", thisBackup.name)
+			backups = append(backups, thisBackup)
+		}
+	}
+	return backups
 }
 
 // determine whether individual backups are required based on max retention dates and their category (daily, weekly, none)
@@ -454,109 +454,121 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 
 // deletes a specified backup by creating an actionset with the action 'delete'
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
-    // set name of deletion actionset
-    deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
+	// set name of deletion actionset
+	deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
 
-    // check if the deletion actionset already exists
-    _, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
-    if err == nil {
-        log.Printf("Deletion actionset %v already exists, skipping creation", deletionActionsetName)
-        return
-    }
+	// check if the deletion actionset already exists
+	_, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+	if err == nil {
+		log.Printf("Deletion actionset %v already exists, skipping creation", deletionActionsetName)
+		return
+	}
 
-    // construct actionset crd manifest to delete backup
-    deletionActionSet := v1alpha1.ActionSet{
-        Spec: &v1alpha1.ActionSetSpec{
-            Actions: []v1alpha1.ActionSpec{
-                {
-                    Name:      "delete",
-                    Blueprint: backupConfig.BlueprintName,
-                    Object: v1alpha1.ObjectReference{
-                        Kind:      "namespace",
-                        Name:      backupConfig.KanisterNamespace,
-                        Namespace: backupConfig.KanisterNamespace,
-                    },
-                },
-            },
-        },
-        TypeMeta: v1.TypeMeta{
-            APIVersion: "cr.kanister.io/v1alpha1",
-            Kind:       "ActionSet",
-        },
-        ObjectMeta: v1.ObjectMeta{
-            Name:      deletionActionsetName,
-            Namespace: backupConfig.KanisterNamespace,
-        },
-    }
+	// construct actionset crd manifest to delete backup
+	deletionActionSet := v1alpha1.ActionSet{
+		Spec: &v1alpha1.ActionSetSpec{
+			Actions: []v1alpha1.ActionSpec{
+				{
+					Name:      "delete",
+					Blueprint: backupConfig.BlueprintName,
+					Object: v1alpha1.ObjectReference{
+						Kind:      "namespace",
+						Name:      backupConfig.KanisterNamespace,
+						Namespace: backupConfig.KanisterNamespace,
+					},
+				},
+			},
+		},
+		TypeMeta: v1.TypeMeta{
+			APIVersion: "cr.kanister.io/v1alpha1",
+			Kind:       "ActionSet",
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Name:      deletionActionsetName,
+			Namespace: backupConfig.KanisterNamespace,
+		},
+	}
 
-    // Add Artifacts if backupLocation exists
-    if unusedBackup.backupLocation != "" {
-        deletionActionSet.Spec.Actions[0].Artifacts = map[string]v1alpha1.Artifact{
-            "cloudObject": {
-                KeyValue: map[string]string{
-                    "backupLocation": unusedBackup.backupLocation,
-                },
-            },
-        }
-    }
+	// Add Artifacts if backupLocation exists
+	if unusedBackup.backupLocation != "" {
+		deletionActionSet.Spec.Actions[0].Artifacts = map[string]v1alpha1.Artifact{
+			"cloudObject": {
+				KeyValue: map[string]string{
+					"backupLocation": unusedBackup.backupLocation,
+				},
+			},
+		}
+	}
 
-    // Add Profile if provided
-    if backupConfig.ProfileName != "" {
-        deletionActionSet.Spec.Actions[0].Profile = &v1alpha1.ObjectReference{
-            Name:      backupConfig.ProfileName,
-            Namespace: backupConfig.KanisterNamespace,
-        }
-    }
+	// Add Profile if provided
+	if backupConfig.ProfileName != "" {
+		deletionActionSet.Spec.Actions[0].Profile = &v1alpha1.ObjectReference{
+			Name:      backupConfig.ProfileName,
+			Namespace: backupConfig.KanisterNamespace,
+		}
+	}
 
-    // convert to unstructured to apply with dynamicClient
-    myCRAsUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&deletionActionSet)
-    if err != nil {
-        panic(err.Error())
-    }
-    myCRUnstructured := &unstructured.Unstructured{Object: myCRAsUnstructured}
+	// convert to unstructured to apply with dynamicClient
+	myCRAsUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&deletionActionSet)
+	if err != nil {
+		panic(err.Error())
+	}
+	myCRUnstructured := &unstructured.Unstructured{Object: myCRAsUnstructured}
 
-    // apply deletion actionset
-    appliedActionSet, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Create(context.Background(), myCRUnstructured, v1.CreateOptions{})
-    log.Printf("Applying the following deletion actionset: %v", appliedActionSet)
-    if err != nil {
-        panic(err.Error())
-    }
+	// apply deletion actionset
+	appliedActionSet, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Create(context.Background(), myCRUnstructured, v1.CreateOptions{})
+	log.Printf("Applying the following deletion actionset: %v", appliedActionSet)
+	if err != nil {
+		panic(err.Error())
+	}
 
-    // loop to check status of deletion actionset whilst actionset is running
-    for {
-        log.Printf("%v: waiting for %v to complete... ", backupConfig.Name, deletionActionsetName)
-        time.Sleep(5 * time.Second)
+	// loop to check status of deletion actionset whilst actionset is running
+	for {
+		log.Printf("%v: waiting for %v to complete... ", backupConfig.Name, deletionActionsetName)
+		time.Sleep(5 * time.Second)
 
-        // get deletion actionset
-        actionset, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
-        if err != nil {
-            log.Printf("%v: error retrieving deletion actionset: %v\n", backupConfig.Name, err)
-            os.Exit(1)
-        }
+		// get deletion actionset
+		actionset, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+		if err != nil {
+			// handle not found error gracefully (actionset deleted while checking)
+			if strings.Contains(err.Error(), "not found") {
+				log.Printf("%v: deletion actionset %v no longer exists (may have been deleted), continuing to next.", backupConfig.Name, deletionActionsetName)
+				return // continue to next actionset in caller
+			}
+			log.Printf("%v: error retrieving deletion actionset: %v\n", backupConfig.Name, err)
+			os.Exit(1)
+		}
 
-        // check if deletion actionset status is "complete"
-        if actionset.Object["status"].(map[string]interface{})["state"] == "complete" {
-            log.Printf("%v: %v has completed\n", backupConfig.Name, deletionActionsetName)
-            break
-        }
+		status, ok := actionset.Object["status"].(map[string]interface{})
+		if !ok || status == nil {
+			log.Printf("%v: status not available yet for %v, waiting...", backupConfig.Name, deletionActionsetName)
+			continue
+		}
 
-        // check if deletion actionset status is "failed"
-        if actionset.Object["status"].(map[string]interface{})["state"] == "failed" {
-            log.Printf("%v: error deleting backup with actionset %v, error: %v\n", backupConfig.Name, deletionActionsetName, actionset.Object["status"].(map[string]interface{})["error"].(map[string]interface{})["message"])
-            break
-        }
+		state, _ := status["state"].(string)
+		if state == "complete" {
+			log.Printf("%v: %v has completed\n", backupConfig.Name, deletionActionsetName)
+			break
+		}
+		if state == "failed" {
+			var errMsg interface{} = ""
+			if errVal, ok := status["error"].(map[string]interface{}); ok {
+				errMsg = errVal["message"]
+			}
+			log.Printf("%v: error deleting backup with actionset %v, error: %v\n", backupConfig.Name, deletionActionsetName, errMsg)
+			break
+		}
+		log.Printf("%v\n", state)
+	}
 
-        // print current state of deletion actionset
-        log.Printf("%v\n", actionset.Object["status"].(map[string]interface{})["state"])
-    }
-
-    // delete backup actionset
-    err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
-    if err != nil {
-        log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
-        os.Exit(1)
-    }
+	// delete backup actionset
+	err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
+	if err != nil {
+		log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
+		os.Exit(1)
+	}
 }
+
 // UnmarshalYAML is a custom YAML unmarshaller to allow string to stringint type conversion
 func (st *StringInt) UnmarshalYAML(b []byte) error {
 	var item interface{}

@@ -1,0 +1,46 @@
+# okteto up -n kanister
+# name: taweret
+
+# build:
+#   taweret:
+#     context: .
+#     dockerfile: Dockerfile
+#     image: <your-ecr-or-dockerhub-repo>/taweret:dev
+#     args:
+#       - platform=linux/amd64
+
+# deploy:
+#   - helm upgrade --install ${OKTETO_AUTODISCOVERY_RELEASE_NAME} charts/taweret --set image.repository=<your-ecr-or-dockerhub-repo>/taweret --set image.tag=dev
+
+dev:
+  .:
+    name: taweret-taweret
+    image: golang:1.22
+    command:
+      - bash
+      - -c
+      - |
+        apt-get update && \
+        apt-get install -y vim git make && \
+        # go build like in dockerfile
+        go build -o taweret .
+        bash
+        # ./taweret
+    workdir: /app
+    sync:
+      - .:/app
+    forward:
+      - 8080:8080
+    environment:
+      KUBECONFIG: /root/.kube/config
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1296Mi
+      requests:
+        cpu: 800m
+        memory: 248Mi
+    persistentVolume:
+      enabled: true
+      size: 5Gi
+    #secrets: []
