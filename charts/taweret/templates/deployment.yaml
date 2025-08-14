@@ -32,11 +32,9 @@ spec:
 {{- end }}
     spec:
 {{- if .Values.serviceAccount.name }}
-  serviceAccountName: {{ .Values.serviceAccount.name }}
-{{- else }}
-  {{- if .Values.serviceAccount.enabled }}
-  serviceAccountName: {{ template "fullname" . }}
-  {{- end }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+{{- else if .Values.serviceAccount.enabled }}
+      serviceAccountName: {{ template "fullname" . }}
 {{- end }}
       containers:
       - name: {{ .Chart.Name }}
