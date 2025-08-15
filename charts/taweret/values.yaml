@@ -1,13 +1,14 @@
 backupConfigs:
-  hourly-pvc:
-    name: hourly-pvc
+  daily-dummy:
+    name: daily-dummy
     kanisterNamespace: kanister
-    blueprintName: csi-snapshot-bp-gp3-ebs-csi-aws-vsc
+    blueprintName: postgres-bp
+    profileName: default-profile
     retention:
-      backups: 76
+      backups: 7
       minutes: 0
-      hours: 5
-      days: 0
+      hours: 0
+      days: 7
       months: 0
       years: 0
 
