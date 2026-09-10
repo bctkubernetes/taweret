@@ -148,18 +148,50 @@ spec:
         - name: version
         - name: appname
         steps:
+        # crane cannot reuse /tekton/creds/.docker: that config authenticates to ECR
+        # through a credential HELPER, and the crane image does not ship one. kaniko gets
+        # away with it because it vendors the ECR helper internally. Pointing crane at
+        # that config produced `401 Unauthorized` on every run, after both architecture
+        # images had already been pushed — so the release looked half-done: :$VERSION and
+        # :$VERSION-arm64 present, but :$VERSION still a single-arch image, not an index.
+        #
+        # Mint a plain registry password instead. The TaskRun runs as tekton-bot, which
+        # carries IRSA role cluster11-tempnew-tekton-bot, so the AWS SDK in this image
+        # picks up credentials with no extra wiring. /workspace is shared between steps.
+        - name: ecr-login
+          image: 363087387819.dkr.ecr.us-east-1.amazonaws.com/bctkubernetes/kanister-kubectl-aws:0.0.17
+          resources: {}
+          script: |
+            #!/bin/bash
+            set -euo pipefail
+            aws ecr get-login-password --region us-east-1 > /workspace/ecr-password
+            chmod 600 /workspace/ecr-password
+            echo "ECR password minted for crane"
         - name: crane-index
           image: gcr.io/go-containerregistry/crane:debug
           env:
+          # writable, unlike /tekton/creds — `crane auth login` needs to create a config
           - name: DOCKER_CONFIG
-            value: /tekton/creds/.docker
+            value: /workspace/.docker
           resources: {}
           script: |
             #!/busybox/sh
             set -e
             R=363087387819.dkr.ecr.us-east-1.amazonaws.com/bctkubernetes/$(params.appname)
+            mkdir -p /workspace/.docker
+            # Backticks deliberately: Tekton scans the whole script for its own
+            # dollar-paren variable syntax, so command substitution written that way is
+            # ambiguous with a params/results reference. Backticks cannot be confused.
+            ECR_PW=`cat /workspace/ecr-password`
+            crane auth login -u AWS -p "$ECR_PW" 363087387819.dkr.ecr.us-east-1.amazonaws.com
+            rm -f /workspace/ecr-password
             crane index append -t $R:$(params.version) -m $R:$(params.version)-amd64 -m $R:$(params.version)-arm64
             echo "index pushed: $R:$(params.version)"
+            # Fail loudly if the tag is somehow still single-arch, rather than reporting
+            # success on a release that did not actually become multi-arch.
+            crane manifest $R:$(params.version) | grep -q '"manifests"' || {
+              echo "ERROR: $R:$(params.version) is not a multi-arch index"; exit 1; }
+            echo "verified: $R:$(params.version) is an OCI index"
   taskRunSpecs:
   - pipelineTaskName: build-arm64
     taskPodTemplate:
