@@ -28,8 +28,19 @@ import (
 
 type backup struct {
 	name, schedule, status, backupLocation string
-	time                                   time.Time
-	inUse                                  bool
+	// artifacts is the VERBATIM status.actions[0].artifacts map of the backup ActionSet.
+	// It is copied straight onto the deletion ActionSet's spec so that whatever output
+	// artifact a blueprint declares is handed back to its delete action unchanged.
+	//
+	// Before this existed, only cloudObject.backupLocation was carried through, which
+	// silently confined Taweret to S3-dump style blueprints. Against a CSI snapshot
+	// blueprint -- which emits `snapshotInfo`, not `cloudObject` -- backupLocation stayed
+	// empty, no artifacts were set on the deletion ActionSet, and Kanister failed every
+	// delete with `Failed to render template: "snapshotInfo" not found`. That is a silent
+	// no-op retention system: backups pile up while the operator reports it is pruning.
+	artifacts map[string]interface{}
+	time      time.Time
+	inUse     bool
 }
 
 type backupconfig struct {
@@ -266,20 +277,29 @@ func getBackups(dynamicClient dynamic.Interface, gvr schema.GroupVersionResource
 			continue
 		}
 
+		// Capture the whole artifacts map, not just one known key. backupLocation is kept
+		// as a separate field only because the metrics/log paths still reference it.
 		var backupLocation string
+		var backupArtifacts map[string]interface{}
 		if artifacts, ok := actionset.Object["status"].(map[string]interface{})["actions"].([]interface{})[0].(map[string]interface{})["artifacts"].(map[string]interface{}); ok {
+			backupArtifacts = artifacts
+			// backupLocation lives at cloudObject.keyValue.backupLocation. This used to
+			// read cloudObject.backupLocation — one level too shallow — so it always
+			// resolved to "" and the `if backupLocation != ""` guard that set the
+			// deletion ActionSet's artifacts never fired, for ANY blueprint. TestGetBackups
+			// has been failing on exactly this since it was written.
 			if cloudObject, ok := artifacts["cloudObject"].(map[string]interface{}); ok {
-				backupLocation, _ = cloudObject["backupLocation"].(string)
-				if !ok {
-					backupLocation = ""
+				if keyValue, ok := cloudObject["keyValue"].(map[string]interface{}); ok {
+					backupLocation, _ = keyValue["backupLocation"].(string)
 				}
 			}
 		}
 
 		thisBackup := backup{
-			name:     fmt.Sprintf("%v", actionMetadata["name"]),
-			status:   fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
-			schedule: backupSchedule,
+			name:      fmt.Sprintf("%v", actionMetadata["name"]),
+			status:    fmt.Sprintf("%v", actionset.Object["status"].(map[string]interface{})["state"]),
+			schedule:  backupSchedule,
+			artifacts: backupArtifacts,
 			// backupLocation: backupLocation,
 		}
 		if backupLocation != "" {
@@ -452,16 +472,71 @@ func sortBackups(backups []backup, backupConfig backupconfig) []backup {
 
 // }
 
+// convertArtifacts turns the unstructured status.actions[0].artifacts map of a backup
+// ActionSet into the typed map the ActionSet spec needs, preserving every artifact name.
+// Values are stringified because Kanister's Artifact.KeyValue is map[string]string while
+// the unstructured source may hand back numbers or bools.
+func convertArtifacts(raw map[string]interface{}) map[string]v1alpha1.Artifact {
+	if len(raw) == 0 {
+		return nil
+	}
+	converted := map[string]v1alpha1.Artifact{}
+	for name, entry := range raw {
+		fields, ok := entry.(map[string]interface{})
+		if !ok {
+			log.Printf("skipping artifact %v: unexpected shape %T", name, entry)
+			continue
+		}
+		artifact := v1alpha1.Artifact{}
+		if keyValue, ok := fields["keyValue"].(map[string]interface{}); ok {
+			artifact.KeyValue = make(map[string]string, len(keyValue))
+			for k, v := range keyValue {
+				artifact.KeyValue[k] = fmt.Sprintf("%v", v)
+			}
+		}
+		if kopiaSnapshot, ok := fields["kopiaSnapshot"].(string); ok {
+			artifact.KopiaSnapshot = kopiaSnapshot
+		}
+		// An artifact with neither field carries nothing the delete action can use;
+		// emitting it would only produce a confusing empty entry.
+		if len(artifact.KeyValue) == 0 && artifact.KopiaSnapshot == "" {
+			log.Printf("skipping artifact %v: no keyValue or kopiaSnapshot content", name)
+			continue
+		}
+		converted[name] = artifact
+	}
+	if len(converted) == 0 {
+		return nil
+	}
+	return converted
+}
+
 // deletes a specified backup by creating an actionset with the action 'delete'
 func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, backupConfig backupconfig) {
 	// set name of deletion actionset
 	deletionActionsetName := fmt.Sprintf("delete-%v", unusedBackup.name)
 
 	// check if the deletion actionset already exists
-	_, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
+	existing, err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Get(context.Background(), deletionActionsetName, v1.GetOptions{})
 	if err == nil {
-		log.Printf("Deletion actionset %v already exists, skipping creation", deletionActionsetName)
-		return
+		// A leftover FAILED deletion actionset must not wedge this backup forever. Since
+		// we no longer delete the backup record on failure (see the end of this function),
+		// returning early here would mean the same backup is retried, skipped on the
+		// "already exists" check, and never progresses -- retention would stall silently.
+		// Clear the failed attempt so this evaluation can retry it.
+		existingState := ""
+		if status, ok := existing.Object["status"].(map[string]interface{}); ok {
+			existingState, _ = status["state"].(string)
+		}
+		if existingState != "failed" {
+			log.Printf("Deletion actionset %v already exists (state: %v), skipping creation", deletionActionsetName, existingState)
+			return
+		}
+		log.Printf("%v: previous deletion actionset %v failed, removing it to retry", backupConfig.Name, deletionActionsetName)
+		if err := dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), deletionActionsetName, v1.DeleteOptions{}); err != nil {
+			log.Printf("%v: could not remove failed deletion actionset %v: %v", backupConfig.Name, deletionActionsetName, err)
+			return
+		}
 	}
 
 	// construct actionset crd manifest to delete backup
@@ -489,8 +564,17 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 		},
 	}
 
-	// Add Artifacts if backupLocation exists
-	if unusedBackup.backupLocation != "" {
+	// Hand every output artifact from the backup ActionSet back to the delete action,
+	// verbatim and whatever it is named. A blueprint's delete action declares
+	// inputArtifactNames matching what its backup action emitted, so copying only one
+	// hard-coded key silently restricts Taweret to blueprints that happen to use it.
+	// csi-snapshot-with-options-bp emits `snapshotInfo`; the previous cloudObject-only
+	// path left Artifacts nil and every delete failed to render.
+	if artifacts := convertArtifacts(unusedBackup.artifacts); len(artifacts) > 0 {
+		deletionActionSet.Spec.Actions[0].Artifacts = artifacts
+	} else if unusedBackup.backupLocation != "" {
+		// Fallback for the original S3-dump shape, kept so behaviour cannot regress for
+		// blueprints that were working before.
 		deletionActionSet.Spec.Actions[0].Artifacts = map[string]v1alpha1.Artifact{
 			"cloudObject": {
 				KeyValue: map[string]string{
@@ -556,12 +640,20 @@ func deleteBackup(unusedBackup backup, dynamicClient dynamic.Interface, gvr sche
 				errMsg = errVal["message"]
 			}
 			log.Printf("%v: error deleting backup with actionset %v, error: %v\n", backupConfig.Name, deletionActionsetName, errMsg)
-			break
+			// Deliberately NOT deleting the backup ActionSet below. The snapshot it points
+			// at still exists, and the ActionSet is the only record tying that snapshot to
+			// the backup that produced it. Removing the record here would leave an
+			// undeletable snapshot with no provenance and, worse, make the failure
+			// invisible: the next evaluation would move on to a different backup and the
+			// operator would look like it was pruning normally. Leaving it means the same
+			// backup is retried, and stays visible until a human fixes the cause.
+			log.Printf("%v: keeping backup actionset %v so the failure stays visible and can be retried", backupConfig.Name, unusedBackup.name)
+			return
 		}
 		log.Printf("%v\n", state)
 	}
 
-	// delete backup actionset
+	// delete backup actionset — only reached when the deletion actionset completed
 	err = dynamicClient.Resource(gvr).Namespace(backupConfig.KanisterNamespace).Delete(context.Background(), unusedBackup.name, v1.DeleteOptions{})
 	if err != nil {
 		log.Printf("%v: error deleting backup actionset: %v\n", backupConfig.Name, err)
