@@ -15,3 +15,9 @@
 # vendor/
 
 dist/
+
+# macOS Finder metadata. Never useful in a repo, and it appears in every directory
+# you happen to open in Finder — .DS_Store and .lighthouse/.DS_Store were both sitting
+# untracked here. Ignored rather than committed.
+.DS_Store
+**/.DS_Store

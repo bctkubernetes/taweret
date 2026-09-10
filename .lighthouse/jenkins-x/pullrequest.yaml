@@ -9,7 +9,9 @@ spec:
     - name: from-build-pack
       resources: {}
       taskSpec:
-        metadata: {}
+        metadata:
+            annotations:
+              karpenter.sh/do-not-disrupt: "true"
         spec: null
         stepTemplate:
           image: uses:jenkins-x/jx3-pipeline-catalog/tasks/go/pullrequest.yaml@versionStream

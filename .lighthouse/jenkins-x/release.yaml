@@ -9,8 +9,18 @@ spec:
     - name: from-build-pack
       resources: {}
       taskSpec:
-        metadata: {}
+        metadata:
+            annotations:
+              karpenter.sh/do-not-disrupt: "true"
         spec: null
+        # MULTI-ARCH (2026-07): pushes :$VERSION and :$VERSION-amd64; the build-arm64
+        # and manifest-index tasks below add the arm64 image and overwrite :$VERSION
+        # with an OCI index. Tracker: bct-cluster/docs/multi-arch-image-audit.md
+        results:
+        - name: version
+          description: release version from .jx/variables.sh
+        - name: sha
+          description: git commit sha this release was built from
         stepTemplate:
           image: uses:jenkins-x/jx3-pipeline-catalog/tasks/go/release.yaml@versionStream
           name: ""
@@ -36,14 +46,129 @@ spec:
             make build
         - name: check-registry
           resources: {}
-        - name: build-container-build
+        - name: emit-results
+          image: harbor.cluster11.tagscloud.org/docker.io/alpine/git
           resources: {}
+          script: |
+            #!/bin/sh
+            set -e
+            . .jx/variables.sh
+            printf "%s" "$VERSION" > $(results.version.path)
+            printf "%s" "$(git rev-parse HEAD)" > $(results.sha.path)
+        - name: build-container-build
+          image: gcr.io/kaniko-project/executor:v1.9.1-debug
+          resources: {}
+          script: |
+            #!/busybox/sh
+            source .jx/variables.sh
+            cp /tekton/creds/.docker/config.json /kaniko/.docker/config.json
+            /kaniko/executor $KANIKO_FLAGS \
+              --context=/workspace/source \
+              --dockerfile=${DOCKERFILE_PATH:-Dockerfile} \
+              --destination=$PUSH_CONTAINER_REGISTRY/$DOCKER_REGISTRY_ORG/$APP_NAME:$VERSION \
+              --destination=$PUSH_CONTAINER_REGISTRY/$DOCKER_REGISTRY_ORG/$APP_NAME:$VERSION-amd64
         - name: promote-changelog
           resources: {}
         - name: promote-helm-release
           resources: {}
         - name: promote-jx-promote
           resources: {}
+    # MULTI-ARCH: arm64 leg — kaniko RUNs natively on a Graviton node from the
+    # tainted spot-arm64-build pool (see taskRunSpecs below). retries: transient
+    # spot/network failures re-run only this task, not the amd64 build/promote.
+    - name: build-arm64
+      retries: 2
+      runAfter:
+      - from-build-pack
+      params:
+      - name: version
+        value: $(tasks.from-build-pack.results.version)
+      - name: sha
+        value: $(tasks.from-build-pack.results.sha)
+      - name: appname
+        value: taweret
+      taskSpec:
+        metadata:
+          annotations:
+            karpenter.sh/do-not-disrupt: "true"
+        params:
+        - name: version
+        - name: sha
+        - name: appname
+        steps:
+        - name: clone
+          image: harbor.cluster11.tagscloud.org/docker.io/alpine/git
+          workingDir: /workspace/source
+          env:
+          - name: GIT_USER
+            valueFrom:
+              secretKeyRef:
+                name: tekton-git
+                key: username
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: tekton-git
+                key: password
+          resources: {}
+          script: |
+            #!/bin/sh
+            set -e
+            git config --global --add safe.directory /workspace/source
+            git clone https://$GIT_USER:$GIT_TOKEN@github.com/bctkubernetes/taweret.git .
+            git checkout $(params.sha)
+        - name: build-container-arm64
+          image: gcr.io/kaniko-project/executor:v1.9.1-debug
+          workingDir: /workspace/source
+          resources:
+            requests:
+              cpu: 1500m
+              memory: 4096Mi
+              ephemeral-storage: "10Gi"
+          script: |
+            #!/busybox/sh
+            cp /tekton/creds/.docker/config.json /kaniko/.docker/config.json
+            /kaniko/executor \
+              --context=/workspace/source \
+              --dockerfile=Dockerfile \
+              --build-arg=TARGETARCH=arm64 \
+              --destination=363087387819.dkr.ecr.us-east-1.amazonaws.com/bctkubernetes/$(params.appname):$(params.version)-arm64
+    # Stitch both arch images into an OCI index under the plain :$VERSION tag.
+    - name: manifest-index
+      retries: 2
+      runAfter:
+      - build-arm64
+      params:
+      - name: version
+        value: $(tasks.from-build-pack.results.version)
+      - name: appname
+        value: taweret
+      taskSpec:
+        params:
+        - name: version
+        - name: appname
+        steps:
+        - name: crane-index
+          image: gcr.io/go-containerregistry/crane:debug
+          env:
+          - name: DOCKER_CONFIG
+            value: /tekton/creds/.docker
+          resources: {}
+          script: |
+            #!/busybox/sh
+            set -e
+            R=363087387819.dkr.ecr.us-east-1.amazonaws.com/bctkubernetes/$(params.appname)
+            crane index append -t $R:$(params.version) -m $R:$(params.version)-amd64 -m $R:$(params.version)-arm64
+            echo "index pushed: $R:$(params.version)"
+  taskRunSpecs:
+  - pipelineTaskName: build-arm64
+    taskPodTemplate:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+      - key: build-arm64
+        operator: Exists
+        effect: NoSchedule
   podTemplate: {}
   serviceAccountName: tekton-bot
   timeout: 12h0m0s
