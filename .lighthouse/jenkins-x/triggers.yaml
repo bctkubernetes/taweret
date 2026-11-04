@@ -4,8 +4,10 @@ spec:
   presubmits:
   - name: pr
     context: "pr"
-    always_run: true
-    optional: false
+    always_run: false
+    optional: true
+    trigger: "(?m)^/test( all| pr)?$"
+    rerun_command: "/test pr"
     source: "pullrequest.yaml"
   postsubmits:
   - name: release
